@@ -37,6 +37,18 @@ function openingKey(taskId) {
 }
 
 /**
+ * Most recent appended text. Append failures arrive later via webhook without the text,
+ * so this is what gets re-sent if the task turns out to be gone.
+ * @param {string} taskId
+ * @returns {string}
+ */
+function lastMessageKey(taskId) {
+  return `wxcc:task:${taskId}:last`;
+}
+
+const LAST_MESSAGE_TTL_SECONDS = 10 * 60;
+
+/**
  * Claim the pending opening text so only one caller appends it.
  * @param {string} taskId
  * @returns {Promise<string | null>}
@@ -101,10 +113,33 @@ class WebexTaskService {
       }, 'Opening message is still pending; appending the newer customer message');
     }
     await webexApi.appendMessage(existingTaskId, text);
+    await redis.set(lastMessageKey(existingTaskId), text, 'EX', LAST_MESSAGE_TTL_SECONDS);
     const ttl = taskTtlSeconds();
     await redis.expire(key, ttl);
     await redis.expire(taskKey(existingTaskId), ttl);
     return existingTaskId;
+  }
+
+  /**
+   * @param {string} taskId
+   * @returns {Promise<string | null>} Namespaced customer id stored when the task was created.
+   */
+  async customerForTask(taskId) {
+    return redis.get(taskKey(taskId));
+  }
+
+  /**
+   * Read and remove the last appended text for a task.
+   * @param {string} taskId
+   * @returns {Promise<string | null>}
+   */
+  async takeLastMessage(taskId) {
+    const text = await redis.eval(
+      "local v = redis.call('GET', KEYS[1]); if v then redis.call('DEL', KEYS[1]) end; return v",
+      1,
+      lastMessageKey(taskId)
+    );
+    return text ? String(text) : null;
   }
 
   /**
@@ -129,18 +164,26 @@ class WebexTaskService {
   }
 
   /**
-   * Drop the customer-to-task mapping and the reverse lookup.
+   * Drop the customer-to-task mapping and the task's own keys.
+   * With a taskId, the customer mapping is removed only if it still points to that task,
+   * so a late event for an old task cannot wipe a newer conversation.
    * @param {string} namespacedId
    * @param {string} [taskId]
-   * @returns {Promise<void>}
+   * @returns {Promise<boolean>} True when the customer mapping was removed.
    */
   async clearSession(namespacedId, taskId) {
-    const deletions = [redis.del(customerKey(namespacedId))];
-    if (taskId) {
-      deletions.push(redis.del(taskKey(taskId)));
-      deletions.push(redis.del(openingKey(taskId)));
+    if (!taskId) {
+      return (await redis.del(customerKey(namespacedId))) > 0;
     }
-    await Promise.all(deletions);
+
+    const removed = await redis.eval(
+      "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) end; return 0",
+      1,
+      customerKey(namespacedId),
+      taskId
+    );
+    await redis.del(taskKey(taskId), openingKey(taskId), lastMessageKey(taskId));
+    return Number(removed) > 0;
   }
 }
 
