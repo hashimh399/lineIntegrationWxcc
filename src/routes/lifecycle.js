@@ -81,7 +81,10 @@ module.exports = async function lifecycleRoutes(fastify) {
     reply.code(200).send('OK');
 
     const { type, data } = request.body || {};
-    if (!data) return;
+    if (!data) {
+      request.log.warn({ type, keys: Object.keys(request.body || {}) }, 'Lifecycle event has no data; ignored');
+      return;
+    }
 
     const taskId = data.taskId ? String(data.taskId) : undefined;
     let namespacedId = originToString(data.origin);
@@ -90,14 +93,10 @@ module.exports = async function lifecycleRoutes(fastify) {
     }
 
     const parsed = parseNamespacedOrigin(namespacedId);
-    const ours = Boolean(parsed && providers.has(parsed.provider));
     // The subscription is org-wide, so events for other channels arrive here too.
-    if (!ours) {
-      request.log.debug({ type, taskId, origin: namespacedId }, 'Ignored lifecycle event for another channel');
-      return;
-    }
-
-    request.log.info({ type, taskId, origin: namespacedId, reason: data.reason }, 'Lifecycle event received');
+    const ours = Boolean(parsed && providers.has(parsed.provider));
+    request.log.info({ type, taskId, origin: namespacedId, reason: data.reason, ours }, 'Lifecycle event received');
+    if (!ours) return;
 
     try {
       if (type === 'task:new') {
