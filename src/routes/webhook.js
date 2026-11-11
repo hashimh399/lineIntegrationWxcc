@@ -1,6 +1,7 @@
 const providers = require('../providers');
 const { parseNamespacedOrigin } = require('../utils/origin');
 const { checkWebexWebhook } = require('../utils/webexSignature');
+const { isDuplicateSystemMessage } = require('../services/outboundThrottle');
 
 module.exports = async function webhookRoutes(fastify) {
   fastify.post('/webhook', async (request, reply) => {
@@ -39,6 +40,15 @@ module.exports = async function webhookRoutes(fastify) {
         return;
       }
 
+      if (data.senderType === 'system' && await isDuplicateSystemMessage(parsed.namespacedId, agentText, attachments)) {
+        request.log.info({
+          provider: parsed.provider,
+          recipientId: parsed.customerId,
+          taskId: data.taskId
+        }, 'Skipped repeated system message');
+        return;
+      }
+
       await provider.sendOutbound(parsed.customerId, agentText, attachments, {
         taskId: data.taskId,
         senderType: data.senderType
@@ -46,7 +56,8 @@ module.exports = async function webhookRoutes(fastify) {
       request.log.info({
         provider: parsed.provider,
         recipientId: parsed.customerId,
-        taskId: data.taskId
+        taskId: data.taskId,
+        senderType: data.senderType
       }, 'Delivered outbound agent message');
     } catch (error) {
       request.log.error({
